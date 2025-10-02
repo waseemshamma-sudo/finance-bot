@@ -43,7 +43,7 @@ def restricted(func):
 
 # حالات المحادثة
 # حالات المحادثة
-ADD_EXPENSE, ADD_INCOME, TRANSFER, NEW_ACCOUNT, CATEGORY, TRANSFER_CONFIRM, PROCESS_BANK_MSG, CONFIRM_TRANSACTION, ACCOUNT_STATEMENT_BALANCE = range(9)
+ADD_EXPENSE, ADD_INCOME, TRANSFER, NEW_ACCOUNT, CATEGORY, TRANSFER_CONFIRM, PROCESS_BANK_MSG, CONFIRM_TRANSACTION, ACCOUNT_STATEMENT_BALANCE, DATE_STATEMENT_ACCOUNT, DATE_STATEMENT_DATES = range(11)
 EXCEL_FILE = "financial_tracker.xlsx"
 
 # دالة جديدة للتعامل مع أسماء الحسابات مع الإيموجي
@@ -342,12 +342,14 @@ def format_transaction_for_approval(transaction_data):
 # أوامر البوت
 
 @restricted
+@restricted
 def start(update: Update, context: CallbackContext):
     keyboard = [
         ['➕ إضافة مصروف', '💸 إضافة دخل'], 
         ['🔄 تحويل بين الحسابات', '📊 عرض الحسابات'], 
         ['📈 عرض المصروفات', '🏦 إضافة حساب جديد'],
-        ['📋 كشف حساب', '📋 كشف حساب رصيد العملية', '🏦 معالجة رسالة بنك']  # الزر الجديد
+        ['📋 كشف حساب', '📋 كشف حساب رصيد العملية', '📅 كشف بالتاريخ'],
+        ['🏦 معالجة رسالة بنك']  # ✅ أضف هذا السطر
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     update.message.reply_text(
@@ -361,7 +363,6 @@ def start(update: Update, context: CallbackContext):
         'اختر من الخيارات في لوحة المفاتيح: 👇', 
         reply_markup=reply_markup
     )
-
 @restricted
 def show_accounts(update: Update, context: CallbackContext):
     accounts, _, _ = load_data()
@@ -929,8 +930,10 @@ def handle_message(update: Update, context: CallbackContext):
         add_new_account(update, context)
     elif text == '📋 كشف حساب':
         account_statement(update, context)
-    elif text == '📋 كشف حساب رصيد العملية':  # الزر الجديد
+    elif text == '📋 كشف حساب رصيد العملية':
         account_statement_balance(update, context)
+    elif text == '📅 كشف بالتاريخ':  # الزر الجديد
+        handle_dated_statement(update, context)
     elif text == '🏦 معالجة رسالة بنك':
         process_bank_message(update, context)
     else:
@@ -1090,6 +1093,389 @@ def split_long_message(message, max_length=4000):
     
     return parts
 
+# ثانياً: الدالة المعدلة handle_dated_statement
+@restricted
+def handle_dated_statement(update: Update, context: CallbackContext):
+    """Handles the initial button press and user input for dated statements."""
+    user_input = update.message.text
+
+    # If command comes from button, ask for account name
+    if user_input == '📅 كشف بالتاريخ':
+        # Store that we are in a dated statement flow
+        context.user_data['current_handler'] = 'dated_statement'
+        update.message.reply_text(
+            "📅 **كشف حساب بالتاريخ:**\n\n"
+            "أدخل **اسم الحساب** فقط:\n\n"
+            "سيتم سؤالك عن التواريخ لاحقاً."
+        )
+        return DATE_STATEMENT_ACCOUNT  # Next state: wait for account name
+
+    # If we are already in the flow, process the account name
+    if context.user_data.get('current_handler') == 'dated_statement':
+        # This input should be the account name
+        account_input = user_input.strip()
+        context.user_data['dated_account'] = account_input
+
+        # Now ask for the date range
+        update.message.reply_text(
+            "📅 **أدخل النطاق الزمني:**\n\n"
+            "أدخل تاريخ البداية والنهاية بالصيغة:\n"
+            "`ddmmyy ddmmyy`\n\n"
+            "**مثال:**\n"
+            "`010725 010825` - من 01/07/2025 إلى 01/08/2025\n\n"
+            "للكشف الكامل، أرسل: `كامل`"
+        )
+        context.user_data['current_handler'] = 'awaiting_dates'
+        return DATE_STATEMENT_DATES  # Next state: wait for dates
+
+    # If we are waiting for dates, process them
+    if context.user_data.get('current_handler') == 'awaiting_dates':
+        date_input = user_input.strip()
+        account_input = context.user_data.get('dated_account')
+        
+        # Clean up the conversation data
+        context.user_data.pop('current_handler', None)
+        context.user_data.pop('dated_account', None)
+
+        # Process the full request using the new function
+        return process_dated_statement_request(update, context, account_input, date_input)
+
+    # Fallback
+    update.message.reply_text("❌ لم أفهم المدخلات. الرجاء استخدام الأزرار.")
+    return ConversationHandler.END
+
+# ثالثاً: الدالة الجديدة process_dated_statement_request
+def process_dated_statement_request(update: Update, context: CallbackContext, account_input: str, date_input: str):
+    """Processes the complete dated statement request."""
+    try:
+        # Load data and find account
+        accounts, transactions, transfers = load_data()
+        account_name = get_account_name(account_input, accounts)
+        
+        if not account_name:
+            update.message.reply_text("❌ الحساب غير موجود!")
+            return ConversationHandler.END
+
+        # Parse dates if provided
+        start_date = None
+        end_date = None
+        
+        if date_input.lower() != 'كامل':
+            date_parts = date_input.split()
+            if len(date_parts) == 2:
+                start_date_str, end_date_str = date_parts
+                try:
+                    start_date = datetime.strptime(start_date_str, '%d%m%y').strftime('%Y-%m-%d')
+                    end_date = datetime.strptime(end_date_str, '%d%m%y').strftime('%Y-%m-%d')
+                except ValueError:
+                    update.message.reply_text("❌ خطأ في صيغة التاريخ. استخدم الصيغة: ddmmyy")
+                    return ConversationHandler.END
+            else:
+                update.message.reply_text("❌ خطأ في الصيغة. استخدم: `ddmmyy ddmmyy` أو `كامل`")
+                return ConversationHandler.END
+
+        # تنظيف اسم الحساب من الإيموجي للعرض
+        cleaned_account_name = re.sub(r'[^\w\s]', '', account_name).strip()
+        
+        # الحصول على معلومات الحساب
+        account_info = accounts[accounts['اسم الحساب'] == account_name].iloc[0]
+        current_balance = account_info['الرصيد']
+        account_type = account_info['النوع']
+        
+        # تحديد إذا كان نوع الحساب يحتاج إلى عكس الألوان
+        reverse_colors = account_type in ['بطاقة ائتمان', 'دين']
+        
+        # حساب الرصيد الافتتاحي الصحيح
+        def calculate_opening_balance(account_name, transactions, transfers):
+            """حساب الرصيد الافتتاحي الصحيح للحساب"""
+            # جميع معاملات الحساب
+            account_transactions = transactions[transactions['الحساب'] == account_name]
+            outgoing_transfers = transfers[transfers['من حساب'] == account_name]
+            incoming_transfers = transfers[transfers['إلى حساب'] == account_name]
+            
+            # حساب الإجماليات
+            total_income = account_transactions[account_transactions['النوع'] == 'دخل']['المبلغ'].sum()
+            total_expenses = account_transactions[account_transactions['النوع'] == 'مصروف']['المبلغ'].sum()
+            total_incoming = incoming_transfers['المبلغ'].sum()
+            total_outgoing = outgoing_transfers['المبلغ'].sum()
+            
+            # الرصيد الافتتاحي = الرصيد الحالي + المصروفات - الدخل + التحويلات الصادرة - التحويلات الواردة
+            opening_balance = current_balance + total_expenses - total_income + total_outgoing - total_incoming
+            
+            return opening_balance
+        
+        # حساب الرصيد الافتتاحي الصحيح
+        opening_balance = calculate_opening_balance(account_name, transactions, transfers)
+        
+        # حساب الرصيد المدور للفترة المحددة
+        rolled_balance = opening_balance
+        rolled_balance_date = None
+        
+        if start_date:
+            # جميع العمليات قبل تاريخ البداية
+            transactions_before = transactions[
+                (transactions['الحساب'] == account_name) & 
+                (transactions['التاريخ'] < start_date)
+            ]
+            transfers_out_before = transfers[
+                (transfers['من حساب'] == account_name) & 
+                (transfers['التاريخ'] < start_date)
+            ]
+            transfers_in_before = transfers[
+                (transfers['إلى حساب'] == account_name) & 
+                (transfers['التاريخ'] < start_date)
+            ]
+            
+            # حساب الرصيد المدور
+            total_income_before = transactions_before[transactions_before['النوع'] == 'دخل']['المبلغ'].sum()
+            total_expenses_before = transactions_before[transactions_before['النوع'] == 'مصروف']['المبلغ'].sum()
+            total_incoming_before = transfers_in_before['المبلغ'].sum()
+            total_outgoing_before = transfers_out_before['المبلغ'].sum()
+            
+            rolled_balance = opening_balance + total_income_before - total_expenses_before + total_incoming_before - total_outgoing_before
+            
+            # الحصول على آخر تاريخ قبل الفترة المحددة
+            all_before_dates = []
+            if not transactions_before.empty:
+                all_before_dates.extend(transactions_before['التاريخ'].tolist())
+            if not transfers_out_before.empty:
+                all_before_dates.extend(transfers_out_before['التاريخ'].tolist())
+            if not transfers_in_before.empty:
+                all_before_dates.extend(transfers_in_before['التاريخ'].tolist())
+            
+            if all_before_dates:
+                rolled_balance_date = max(all_before_dates)
+            else:
+                rolled_balance_date = "2025-08-01"
+
+        # تصفية المعاملات والتحويلات بناء على النطاق التاريخي
+        if start_date and end_date:
+            account_transactions = transactions[
+                (transactions['الحساب'] == account_name) & 
+                (transactions['التاريخ'] >= start_date) & 
+                (transactions['التاريخ'] <= end_date)
+            ]
+            outgoing_transfers = transfers[
+                (transfers['من حساب'] == account_name) & 
+                (transfers['التاريخ'] >= start_date) & 
+                (transfers['التاريخ'] <= end_date)
+            ]
+            incoming_transfers = transfers[
+                (transfers['إلى حساب'] == account_name) & 
+                (transfers['التاريخ'] >= start_date) & 
+                (transfers['التاريخ'] <= end_date)
+            ]
+        else:
+            # إذا لم يتم تحديد تواريخ، نستخدم كل البيانات
+            account_transactions = transactions[transactions['الحساب'] == account_name]
+            outgoing_transfers = transfers[transfers['من حساب'] == account_name]
+            incoming_transfers = transfers[transfers['إلى حساب'] == account_name]
+
+        # حساب إجماليات الفترة المحددة
+        total_income_period = account_transactions[account_transactions['النوع'] == 'دخل']['المبلغ'].sum()
+        total_expenses_period = account_transactions[account_transactions['النوع'] == 'مصروف']['المبلغ'].sum()
+        total_incoming_period = incoming_transfers['المبلغ'].sum()
+        total_outgoing_period = outgoing_transfers['المبلغ'].sum()
+
+        # إنشاء تقرير منظم بالشكل الجديد
+        message = f"<b>📊 كشف بالتاريخ: {cleaned_account_name}</b>\n"
+        
+        # إضافة النطاق التاريخي إذا كان محدداً
+        if start_date and end_date:
+            start_formatted = datetime.strptime(start_date, '%Y-%m-%d').strftime('%d-%m-%Y')
+            end_formatted = datetime.strptime(end_date, '%Y-%m-%d').strftime('%d-%m-%Y')
+            message += f"<b>📅 الفترة: من {start_formatted} إلى {end_formatted}</b>\n"
+        else:
+            message += f"<b>📅 التاريخ: {datetime.now().strftime('%d-%m-%Y')} (كشف كامل)</b>\n"
+        
+        message += "<b>⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯</b>\n\n"
+        
+        # عرض الرصيد المدور أو الافتتاحي بناءً على النوع
+        if start_date:
+            message += f"<b>💰 الرصيد المدور: {rolled_balance:,.0f} ريال</b>\n\n"
+        else:
+            message += f"<b>💰 الرصيد الافتتاحي: {opening_balance:,.0f} ريال</b>\n\n"
+        
+        message += "<b>💳 العمليات</b>\n"
+        message += "<b>⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯</b>\n"
+        
+        # دمج المعاملات والتحويلات في قائمة واحدة مرتبة حسب التاريخ
+        all_operations = []
+        
+        # 🔽 معالجة آمنة للمعاملات
+        for _, transaction in account_transactions.iterrows():
+            # معالجة تنسيق التاريخ بشكل آمن
+            raw_date = str(transaction['التاريخ'])
+            formatted_date = safe_date_format(raw_date)
+            
+            operation = {
+                'date': raw_date,  # حفظ التاريخ الأصلي للترتيب
+                'display_date': formatted_date,  # التاريخ المنسق للعرض
+                'description': transaction['التصنيف'],
+                'amount': transaction['المبلغ'],
+                'type': transaction['النوع'],
+                'operation_type': 'معاملة',
+                'is_income': transaction['النوع'] == 'دخل'
+            }
+            all_operations.append(operation)
+        
+        # 🔽 معالجة آمنة للتحويلات الصادرة
+        for _, transfer in outgoing_transfers.iterrows():
+            to_acc_clean = re.sub(r'[^\w\s]', '', transfer['إلى حساب']).strip()
+            raw_date = str(transfer['التاريخ'])
+            formatted_date = safe_date_format(raw_date)
+            
+            operation = {
+                'date': raw_date,
+                'display_date': formatted_date,
+                'description': f"تحويل إلى {to_acc_clean}",
+                'amount': transfer['المبلغ'],
+                'type': 'تحويل صادر',
+                'operation_type': 'تحويل',
+                'is_income': False
+            }
+            all_operations.append(operation)
+        
+        # 🔽 معالجة آمنة للتحويلات الواردة
+        for _, transfer in incoming_transfers.iterrows():
+            from_acc_clean = re.sub(r'[^\w\s]', '', transfer['من حساب']).strip()
+            raw_date = str(transfer['التاريخ'])
+            formatted_date = safe_date_format(raw_date)
+            
+            operation = {
+                'date': raw_date,
+                'display_date': formatted_date,
+                'description': f"تحويل من {from_acc_clean}",
+                'amount': transfer['المبلغ'],
+                'type': 'تحويل وارد',
+                'operation_type': 'تحويل',
+                'is_income': True
+            }
+            all_operations.append(operation)
+        
+        # بدء الرصيد الجاري من الرصيد الصحيح
+        if start_date:
+            running_balance = rolled_balance
+        else:
+            running_balance = opening_balance
+        
+        # عرض الرصيد الافتتاحي أو المدور كأول عملية
+        if start_date and rolled_balance_date:
+            # 🔽 معالجة آمنة لتاريخ الرصيد المدور
+            rolled_date_formatted = safe_date_format(rolled_balance_date)
+            
+            # تطبيق عكس الألوان للرصيد المدور
+            if reverse_colors:
+                emoji_color = "📕" if running_balance >= 0 else "📗"
+            else:
+                emoji_color = "📗" if running_balance >= 0 else "📕"
+                
+            message += f"<b> 📆 {rolled_date_formatted} || الرصيد المدور حتى</b>\n"
+            message += f"<b> ▪  {running_balance:,.0f} ريال ||  الرصيد {running_balance:,.0f} ريال {emoji_color}</b>\n\n"
+        else:
+            # للكشف الكامل، نعرض الرصيد الافتتاحي
+            opening_date = "01-08-2025"
+            if reverse_colors:
+                emoji_color = "📕" if running_balance >= 0 else "📗"
+            else:
+                emoji_color = "📗" if running_balance >= 0 else "📕"
+                
+            message += f"<b> 📆 {opening_date} || الرصيد الافتتاحي</b>\n"
+            message += f"<b> ▪  {running_balance:,.0f} ريال ||  الرصيد {running_balance:,.0f} ريال {emoji_color}</b>\n\n"
+        
+        # ترتيب العمليات حسب التاريخ (باستخدام التاريخ الأصلي)
+        all_operations.sort(key=lambda x: x['date'])
+        
+        # عرض العمليات مع الرصيد
+        for operation in all_operations:
+            op_date = operation['display_date']
+            
+            if operation['is_income']:
+                running_balance += operation['amount']
+                amount_display = f"+{operation['amount']:,.0f}"
+            else:
+                running_balance -= operation['amount']
+                amount_display = f"-{operation['amount']:,.0f}"
+            
+            # تطبيق عكس الألوان لكل عملية
+            if reverse_colors:
+                emoji_color = "📕" if running_balance >= 0 else "📗"
+            else:
+                emoji_color = "📗" if running_balance >= 0 else "📕"
+            
+            message += f"<b> 📆 {op_date} || {operation['description']}</b>\n"
+            message += f"<b> ▪  {amount_display} ريال ||   الرصيد :  {running_balance:,.0f} ريال {emoji_color}</b>\n\n"
+        
+        # تطبيق عكس الألوان للرصيد الختامي
+        final_balance = running_balance
+        if reverse_colors:
+            final_emoji = "📕" if final_balance >= 0 else "📗"
+        else:
+            final_emoji = "📗" if final_balance >= 0 else "📕"
+            
+        # الملخص المالي
+        message += "<b>🧮 الملخص المالي</b>\n"
+        message += "<b>⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯</b>\n"
+        
+        if start_date:
+            message += f"<b>الرصيد المدور: {rolled_balance:,.0f} ريال</b>\n"
+        else:
+            message += f"<b>الرصيد الافتتاحي: {opening_balance:,.0f} ريال</b>\n"
+            
+        message += f"<b>إجمالي مدين: +{total_income_period + total_incoming_period:,.0f} ريال</b>\n"
+        message += f"<b>إجمالي دائن : -{total_expenses_period + total_outgoing_period:,.0f} ريال</b>\n"
+        message += "<b>⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯</b>\n"
+        message += f"<b>💰 الرصيد الختامي: {final_balance:,.0f} ريال {final_emoji}</b>"
+        
+        # إرسال الرسالة مع معالجة الطول الزائد
+        message_parts = split_long_message(message)
+        
+        for i, part in enumerate(message_parts):
+            try:
+                update.message.reply_text(part, parse_mode='HTML')
+            except BadRequest as e:
+                if "Message is too long" in str(e):
+                    if i == 0:
+                        send_as_file(update, message, cleaned_account_name)
+                        break
+                else:
+                    raise e
+                    
+    except Exception as e:
+        update.message.reply_text(f"❌ خطأ: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    
+    return ConversationHandler.END
+
+def safe_date_format(date_str):
+    """تحويل التاريخ إلى تنسيق آمن DD-MM-YYYY"""
+    try:
+        # إذا كان التاريخ فارغاً
+        if not date_str or pd.isna(date_str):
+            return "01-01-2025"
+        
+        date_str = str(date_str).strip()
+        
+        # محاولة تحويل من YYYY-MM-DD
+        if re.match(r'\d{4}-\d{2}-\d{2}', date_str):
+            return datetime.strptime(date_str, '%Y-%m-%d').strftime('%d-%m-%Y')
+        
+        # محاولة تحويل من DD-MM-YYYY
+        elif re.match(r'\d{2}-\d{2}-\d{4}', date_str):
+            return date_str  # هو بالفعل بالتنسيق المطلوب
+        
+        # محاولة تحويل من DD/MM/YYYY
+        elif re.match(r'\d{2}/\d{2}/\d{4}', date_str):
+            return datetime.strptime(date_str, '%d/%m/%Y').strftime('%d-%m-%Y')
+        
+        # إذا فشلت جميع المحاولات، ارجع التاريخ كما هو
+        return date_str
+        
+    except Exception:
+        # في حالة أي خطأ، ارجع التاريخ الأصلي
+        return str(date_str)
+
 @restricted
 def handle_account_statement_balance(update: Update, context: CallbackContext):
     try:
@@ -1193,8 +1579,8 @@ def handle_account_statement_balance(update: Update, context: CallbackContext):
         else:
             emoji_color = "📗" if running_balance >= 0 else "📕"
             
-        message += f"<b>▪ {opening_date_formatted} || الرصيد الافتتاحي</b>\n"
-        message += f"<b>   {running_balance:,.0f} ريال ||  الرصيد {running_balance:,.0f} ريال {emoji_color}</b>\n\n"
+        message += f"<b> 📆 {opening_date_formatted} || الرصيد الافتتاحي</b>\n"
+        message += f"<b> ▪  {running_balance:,.0f} ريال ||  الرصيد {running_balance:,.0f} ريال {emoji_color}</b>\n\n"
         
         # ترتيب العمليات حسب التاريخ
         all_operations.sort(key=lambda x: x['date'])
@@ -1412,7 +1798,8 @@ def main():
         MessageHandler(Filters.regex('^🔄 تحويل بين الحسابات$'), transfer_money),
         MessageHandler(Filters.regex('^🏦 إضافة حساب جديد$'), add_new_account),
         MessageHandler(Filters.regex('^📋 كشف حساب$'), account_statement),
-        MessageHandler(Filters.regex('^📋 كشف حساب رصيد العملية$'), account_statement_balance),  # المدخل الجديد
+        MessageHandler(Filters.regex('^📋 كشف حساب رصيد العملية$'), account_statement_balance),
+        MessageHandler(Filters.regex('^📅 كشف بالتاريخ$'), handle_dated_statement),
         MessageHandler(Filters.regex('^🏦 معالجة رسالة بنك$'), process_bank_message)
     ],
     states={
@@ -1422,7 +1809,9 @@ def main():
         TRANSFER_CONFIRM: [MessageHandler(Filters.text & ~Filters.command, handle_transfer_confirm)],
         NEW_ACCOUNT: [MessageHandler(Filters.text & ~Filters.command, handle_new_account)],
         CATEGORY: [MessageHandler(Filters.text & ~Filters.command, handle_account_statement)],
-        ACCOUNT_STATEMENT_BALANCE: [MessageHandler(Filters.text & ~Filters.command, handle_account_statement_balance)],  # الحالة الجديدة
+        ACCOUNT_STATEMENT_BALANCE: [MessageHandler(Filters.text & ~Filters.command, handle_account_statement_balance)],
+        DATE_STATEMENT_ACCOUNT: [MessageHandler(Filters.text & ~Filters.command, handle_dated_statement)],
+        DATE_STATEMENT_DATES: [MessageHandler(Filters.text & ~Filters.command, handle_dated_statement)],
         PROCESS_BANK_MSG: [MessageHandler(Filters.text & ~Filters.command, handle_bank_message)],
         CONFIRM_TRANSACTION: [MessageHandler(Filters.text & ~Filters.command, handle_transaction_confirmation)]
     },
