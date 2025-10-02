@@ -7,7 +7,12 @@ from datetime import datetime
 import re
 
 # تحميل المتغيرات من ملف .env
-load_dotenv(r"C:\Users\Admin\finance\.env")
+try:
+    # هذه تحاول تحميل الإعدادات من المسار المطلق (يعمل محلياً)
+    load_dotenv(r"C:\Users\Admin\finance\.env")
+except:
+    # إذا فشلت (مثلًا على السيرفر)، تحاول تحميله من المسار النسبي
+    load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 if not TELEGRAM_BOT_TOKEN:
