@@ -1,6 +1,4 @@
-# Python dependencies
 python-telegram-bot==20.7
-pandas==2.0.3
+pandas==1.5.3  # إصدار أقدم ومستقر
 openpyxl==3.1.2
 python-dotenv==1.0.0
-python-dateutil==2.8.2
