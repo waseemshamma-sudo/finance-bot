@@ -4,6 +4,7 @@ from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler
 from dotenv import load_dotenv
 from datetime import datetime
+from keep_alive import keep_alive
 import re
 
 # تحميل المتغيرات من ملف .env
@@ -1826,6 +1827,8 @@ def main():
     dispatcher.add_handler(CommandHandler("start", start))
     dispatcher.add_handler(conv_handler)
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+    # === إضافة keep_alive هنا ===
+    keep_alive()
     
     print("🤖 البوت يعمل...")
     updater.start_polling()
